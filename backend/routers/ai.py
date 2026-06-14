@@ -1,6 +1,6 @@
 import os
 import json
-import google.generativeai as genai
+from groq import Groq
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -11,21 +11,23 @@ import schemas
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-
-def get_model():
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+def get_client():
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-pro")
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured. Please add GROQ_API_KEY to your environment.")
+    return Groq(api_key=api_key)
 
 
-def safe_generate(model, prompt: str, max_retries: int = 2) -> str:
-    """Generate text with retry on failure."""
+def safe_generate(client, prompt: str, max_retries: int = 2) -> str:
+    """Generate text with retry on failure using Groq."""
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(prompt)
-            return response.text.strip()
+            completion = client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            return completion.choices[0].message.content.strip()
         except Exception as e:
             if attempt == max_retries - 1:
                 raise
@@ -34,8 +36,8 @@ def safe_generate(model, prompt: str, max_retries: int = 2) -> str:
 
 @router.post("/segment", response_model=schemas.AISegmentResponse)
 def ai_segment(payload: schemas.AISegmentRequest, db: Session = Depends(get_db)):
-    """Convert natural language to segment filter criteria using Gemini."""
-    model = get_model()
+    """Convert natural language to segment filter criteria using Groq."""
+    client = get_client()
 
     prompt = f"""You are a CRM segmentation assistant. Convert the user's description into a JSON filter object.
 
@@ -50,11 +52,11 @@ Available filter keys:
 
 User request: "{payload.prompt}"
 
-Respond ONLY with valid JSON, no markdown, no explanation outside JSON:
+Respond ONLY with valid JSON, no markdown, no explanation outside JSON. Example:
 {{"filter_criteria": {{"min_spent": 5000}}, "explanation": "Customers who spent over ₹5000"}}"""
 
     try:
-        raw = safe_generate(model, prompt)
+        raw = safe_generate(client, prompt)
         # Strip markdown code fences if present
         raw = raw.replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
@@ -75,8 +77,8 @@ Respond ONLY with valid JSON, no markdown, no explanation outside JSON:
 
 @router.post("/message", response_model=schemas.AIMessageResponse)
 def ai_message(payload: schemas.AIMessageRequest, db: Session = Depends(get_db)):
-    """Generate a personalized message for a customer using Gemini."""
-    model = get_model()
+    """Generate a personalized message for a customer using Groq."""
+    client = get_client()
 
     customer = db.query(Customer).filter(Customer.id == payload.customer_id).first()
     if not customer:
@@ -110,7 +112,7 @@ Rules:
 Write ONLY the message text, nothing else:"""
 
     try:
-        msg_text = safe_generate(model, prompt)
+        msg_text = safe_generate(client, prompt)
         msg_text = msg_text.replace("{name}", customer.name)
     except Exception as e:
         msg_text = f"Hi {customer.name}, we have an exciting offer just for you! Visit us today. - BrewCo"
@@ -120,8 +122,8 @@ Write ONLY the message text, nothing else:"""
 
 @router.post("/insights", response_model=schemas.AIInsightsResponse)
 def ai_insights(payload: schemas.AIInsightsRequest, db: Session = Depends(get_db)):
-    """Generate campaign performance insights using Gemini."""
-    model = get_model()
+    """Generate campaign performance insights using Groq."""
+    client = get_client()
 
     campaign = db.query(Campaign).filter(Campaign.id == payload.campaign_id).first()
     if not campaign:
@@ -148,7 +150,7 @@ Converted: {campaign.total_converted:,} ({conv_rate}%)
 Write your 2-3 sentence insight:"""
 
     try:
-        insights = safe_generate(model, prompt)
+        insights = safe_generate(client, prompt)
     except Exception as e:
         insights = f"Campaign delivered to {delivery_rate}% of recipients with a {open_rate}% open rate and {conv_rate}% conversion rate. Performance aligns with industry benchmarks for {campaign.channel} campaigns."
 
